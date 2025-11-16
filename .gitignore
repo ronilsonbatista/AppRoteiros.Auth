@@ -1,0 +1,22 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Build
+bin/
+obj/
+Debug/
+Release/
+
+# ASP.NET & EF
+appsettings.Development.json
+appsettings.Local.json
+
+# Bancos locais
+*.db
+*.mdf
+*.ldf
+
+# Outros
+*.sqlite
