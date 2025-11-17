@@ -22,8 +22,8 @@ namespace AppRoteiros.Auth.Web.Dtos.Auth
             ErrorMessage = "A senha deve ter pelo menos 8 caracteres e 1 letra maiúscula.")]
         public string Password { get; set; } = string.Empty;
 
-        [Phone]
         [Required]
+        [Phone]
         public string PhoneNumber { get; set; } = string.Empty;
     }
 }
