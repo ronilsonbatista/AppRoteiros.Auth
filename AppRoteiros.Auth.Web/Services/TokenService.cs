@@ -1,6 +1,5 @@
 ﻿using System;
 using System.IdentityModel.Tokens.Jwt;
-using System.Linq;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
@@ -8,13 +7,18 @@ using System.Threading.Tasks;
 using AppRoteiros.Auth.Web.Config;
 using AppRoteiros.Auth.Web.Data;
 using AppRoteiros.Auth.Web.Domain.Entities;
-using AppRoteiros.Auth.Web.Dtos.Auth;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 
 namespace AppRoteiros.Auth.Web.Services
 {
+    /// <summary>
+    /// Serviço responsável por:
+    /// - Gerar AccessToken (JWT)
+    /// - Criar RefreshToken persistido no banco
+    /// - Rotacionar RefreshToken no endpoint /refresh
+    /// </summary>
     public class TokenService : ITokenService
     {
         private readonly JwtSettings _jwtSettings;
@@ -26,10 +30,14 @@ namespace AppRoteiros.Auth.Web.Services
             _dbContext = dbContext;
         }
 
+        /// <summary>
+        /// Gera um par de tokens: AccessToken + RefreshToken.
+        /// </summary>
         public async Task<TokenResult> GenerateTokensAsync(ApplicationUser user)
         {
             var now = DateTime.UtcNow;
 
+            // Claims do JWT (o app mobile vai usar principalmente o "sub" = userId)
             var claims = new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, user.Id),
@@ -39,6 +47,7 @@ namespace AppRoteiros.Auth.Web.Services
                 new Claim("lastName", user.LastName ?? string.Empty)
             };
 
+            // Assinatura do token
             var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtSettings.Key));
             var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
@@ -55,33 +64,48 @@ namespace AppRoteiros.Auth.Web.Services
 
             var accessToken = new JwtSecurityTokenHandler().WriteToken(jwt);
 
+            // Cria e salva RefreshToken no banco
             var refreshToken = await CreateRefreshTokenAsync(user);
 
             return new TokenResult
             {
                 AccessToken = accessToken,
                 RefreshToken = refreshToken.Token,
-                ExpiresInSeconds = (int)(_jwtSettings.AccessTokenMinutes * 60)
+                ExpiresInSeconds = _jwtSettings.AccessTokenMinutes * 60
             };
         }
 
+        /// <summary>
+        /// Rotaciona tokens com base em um refreshToken existente.
+        /// 1) Valida token e expiração
+        /// 2) Revoga token antigo
+        /// 3) Gera um novo par de tokens
+        /// </summary>
         public async Task<TokenResult?> RefreshTokensAsync(string refreshToken)
         {
             var existing = await _dbContext.RefreshTokens
                 .Include(rt => rt.User)
                 .FirstOrDefaultAsync(rt => rt.Token == refreshToken && !rt.IsRevoked);
 
-            if (existing == null || existing.ExpiresAt <= DateTime.UtcNow || existing.User == null)
-            {
+            if (existing == null)
                 return null;
-            }
 
+            if (existing.ExpiresAt <= DateTime.UtcNow)
+                return null;
+
+            if (existing.User == null)
+                return null;
+
+            // Revoga o token antigo antes de emitir um novo
             existing.IsRevoked = true;
             await _dbContext.SaveChangesAsync();
 
             return await GenerateTokensAsync(existing.User);
         }
 
+        /// <summary>
+        /// Cria e persiste um refresh token para o usuário.
+        /// </summary>
         private async Task<RefreshToken> CreateRefreshTokenAsync(ApplicationUser user)
         {
             var token = GenerateSecureToken();
@@ -101,6 +125,9 @@ namespace AppRoteiros.Auth.Web.Services
             return refreshToken;
         }
 
+        /// <summary>
+        /// Gera um token criptograficamente seguro.
+        /// </summary>
         private static string GenerateSecureToken()
         {
             var randomNumber = new byte[64];
