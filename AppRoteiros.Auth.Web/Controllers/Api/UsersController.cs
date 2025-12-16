@@ -38,7 +38,7 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
         [HttpGet("me")]
         public async Task<IActionResult> Me()
         {
-            // Recupera o userId do JWT
+            // Recupera o userId do JWT ("sub" é o padrão que colocamos no token)
             var userId = User.FindFirstValue(JwtRegisteredClaimNames.Sub)
                          ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
 
@@ -48,6 +48,7 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
                 return Unauthorized(new { message = "Token inválido ou usuário não identificado." });
             }
 
+            // Busca usuário no banco
             var user = await _userManager.FindByIdAsync(userId);
             if (user == null)
             {
@@ -55,6 +56,7 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
                 return NotFound(new { message = "Usuário não encontrado." });
             }
 
+            // Monta resposta
             var response = new UserProfileResponse
             {
                 Id = user.Id,
@@ -74,11 +76,9 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
         [HttpPut("me")]
         public async Task<IActionResult> UpdateMe([FromBody] UpdateProfileRequest request)
         {
-            // Validações do DTO
             if (!ModelState.IsValid)
                 return BadRequest(ModelState);
 
-            // Recupera o userId do JWT
             var userId = User.FindFirstValue(JwtRegisteredClaimNames.Sub)
                          ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
 
@@ -88,7 +88,6 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
                 return Unauthorized(new { message = "Token inválido ou usuário não identificado." });
             }
 
-            // Busca usuário no banco
             var user = await _userManager.FindByIdAsync(userId);
             if (user == null)
             {
@@ -101,7 +100,6 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
             user.LastName = request.LastName;
             user.PhoneNumber = request.PhoneNumber;
 
-            // Persiste alterações via Identity
             var result = await _userManager.UpdateAsync(user);
 
             if (!result.Succeeded)
@@ -123,6 +121,55 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
             };
 
             return Ok(response);
+        }
+
+        /// <summary>
+        /// Troca a senha do usuário autenticado.
+        /// POST /api/users/change-password
+        /// 
+        /// Regras:
+        /// - Precisa informar senha atual correta
+        /// - Nova senha respeita regras do Identity (e as validações do DTO)
+        /// </summary>
+        [HttpPost("change-password")]
+        public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest request)
+        {
+            // Validação do DTO
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState);
+
+            // Descobre o usuário logado a partir do token
+            var userId = User.FindFirstValue(JwtRegisteredClaimNames.Sub)
+                         ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            if (string.IsNullOrEmpty(userId))
+            {
+                _logger.LogWarning("POST /api/users/change-password sem userId nas claims.");
+                return Unauthorized(new { message = "Token inválido ou usuário não identificado." });
+            }
+
+            var user = await _userManager.FindByIdAsync(userId);
+            if (user == null)
+            {
+                _logger.LogWarning("Usuário não encontrado para o id {UserId} no change-password.", userId);
+                return NotFound(new { message = "Usuário não encontrado." });
+            }
+
+            // Troca de senha via Identity:
+            // - Valida senha atual
+            // - Aplica regras de senha configuradas no IdentityOptions
+            var result = await _userManager.ChangePasswordAsync(user, request.CurrentPassword, request.NewPassword);
+
+            if (!result.Succeeded)
+            {
+                // Se falhar, devolvemos erros do Identity (ex: senha atual incorreta)
+                foreach (var error in result.Errors)
+                    ModelState.AddModelError(error.Code, error.Description);
+
+                return BadRequest(ModelState);
+            }
+
+            return Ok(new { message = "Senha atualizada com sucesso." });
         }
     }
 }
