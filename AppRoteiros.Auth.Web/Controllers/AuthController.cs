@@ -1,7 +1,11 @@
-﻿using System.Threading.Tasks;
+﻿using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Threading.Tasks;
 using AppRoteiros.Auth.Web.Domain.Entities;
 using AppRoteiros.Auth.Web.Dtos.Auth;
 using AppRoteiros.Auth.Web.Services;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Hosting;
@@ -216,6 +220,10 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
             });
         }
 
+        /// <summary>
+        /// POST /api/auth/refresh
+        /// Rotaciona refresh token e retorna um novo par de tokens.
+        /// </summary>
         [HttpPost("refresh")]
         public async Task<IActionResult> Refresh([FromBody] RefreshRequest request)
         {
@@ -234,6 +242,10 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
             });
         }
 
+        /// <summary>
+        /// POST /api/auth/forgot-password
+        /// Gera token de reset. Em DEV retorna no response para teste.
+        /// </summary>
         [HttpPost("forgot-password")]
         public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest request)
         {
@@ -269,6 +281,10 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
             });
         }
 
+        /// <summary>
+        /// POST /api/auth/reset-password
+        /// Reseta a senha usando token gerado em forgot-password.
+        /// </summary>
         [HttpPost("reset-password")]
         public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest request)
         {
@@ -294,6 +310,44 @@ namespace AppRoteiros.Auth.Web.Controllers.Api
             }
 
             return Ok(new { message = "Senha redefinida com sucesso." });
+        }
+
+        /// <summary>
+        /// POST /api/auth/logout
+        /// Revoga um refresh token específico (logout do device/app).
+        /// Requer JWT (usuário autenticado).
+        /// </summary>
+        [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]
+        [HttpPost("logout")]
+        public async Task<IActionResult> Logout([FromBody] LogoutRequest request)
+        {
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState);
+
+            var revoked = await _tokenService.RevokeRefreshTokenAsync(request.RefreshToken);
+
+            // Segurança: mesmo se token não existir, devolvemos OK
+            return Ok(new { message = "Logout realizado com sucesso.", revoked });
+        }
+
+        /// <summary>
+        /// POST /api/auth/logout-all
+        /// Revoga todos os refresh tokens do usuário autenticado.
+        /// Requer JWT (usuário autenticado).
+        /// </summary>
+        [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]
+        [HttpPost("logout-all")]
+        public async Task<IActionResult> LogoutAll()
+        {
+            var userId = User.FindFirstValue(JwtRegisteredClaimNames.Sub)
+                         ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(new { message = "Token inválido ou usuário não identificado." });
+
+            var count = await _tokenService.RevokeAllRefreshTokensAsync(userId);
+
+            return Ok(new { message = "Logout global realizado com sucesso.", revokedTokens = count });
         }
     }
 }

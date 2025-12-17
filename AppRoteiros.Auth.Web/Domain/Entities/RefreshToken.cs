@@ -3,44 +3,40 @@
 namespace AppRoteiros.Auth.Web.Domain.Entities
 {
     /// <summary>
-    /// Entidade persistida no banco para controle de Refresh Tokens.
-    /// Importante: isso NÃO é DTO. Isso é ENTIDADE.
+    /// Entidade responsável por armazenar Refresh Tokens.
+    /// Um usuário pode ter vários (multi-device).
     /// </summary>
     public class RefreshToken
     {
-        /// <summary>
-        /// Chave primária (Identity do EF).
-        /// </summary>
-        public int Id { get; set; }
+        public Guid Id { get; set; }
 
         /// <summary>
-        /// Token em si (string segura, gerada com RNG criptográfico).
+        /// Token em si (string segura).
         /// </summary>
         public string Token { get; set; } = string.Empty;
 
         /// <summary>
-        /// Usuário dono do refresh token (FK para AspNetUsers).
+        /// Usuário dono do token.
         /// </summary>
         public string UserId { get; set; } = string.Empty;
 
         /// <summary>
-        /// Data de expiração do refresh token.
-        /// </summary>
-        public DateTime ExpiresAt { get; set; }
-
-        /// <summary>
-        /// Data de criação do refresh token.
+        /// Data de criação do token.
         /// </summary>
         public DateTime CreatedAt { get; set; }
 
         /// <summary>
-        /// Marca se o token foi revogado (logout, rotação, etc.).
+        /// Data de expiração do token.
         /// </summary>
-        public bool IsRevoked { get; set; } = false;
+        public DateTime ExpiresAt { get; set; }
 
         /// <summary>
-        /// Navegação para o usuário.
+        /// Data de revogação (logout / rotação).
+        /// NULL = token ativo.
         /// </summary>
+        public DateTime? RevokedAt { get; set; }
+
+        // Navegação (opcional, mas recomendada)
         public ApplicationUser? User { get; set; }
     }
 }
