@@ -4,136 +4,161 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
-using AppRoteiros.Auth.Web.Config;
 using AppRoteiros.Auth.Web.Data;
 using AppRoteiros.Auth.Web.Domain.Entities;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 
 namespace AppRoteiros.Auth.Web.Services
 {
     /// <summary>
-    /// Serviço responsável por:
-    /// - Gerar AccessToken (JWT)
-    /// - Criar RefreshToken persistido no banco
-    /// - Rotacionar RefreshToken no endpoint /refresh
+    /// TokenService:
+    /// - Gera JWT (AccessToken)
+    /// - Gera e persiste RefreshToken
+    /// - Faz rotação de RefreshToken
+    /// - Revoga tokens
     /// </summary>
     public class TokenService : ITokenService
     {
-        private readonly JwtSettings _jwtSettings;
-        private readonly ApplicationDbContext _dbContext;
+        private readonly ApplicationDbContext _db;
+        private readonly IConfiguration _config;
 
-        public TokenService(IOptions<JwtSettings> jwtSettings, ApplicationDbContext dbContext)
+        public TokenService(ApplicationDbContext db, IConfiguration config)
         {
-            _jwtSettings = jwtSettings.Value;
-            _dbContext = dbContext;
+            _db = db;
+            _config = config;
         }
 
-        /// <summary>
-        /// Gera um par de tokens: AccessToken + RefreshToken.
-        /// </summary>
         public async Task<TokenResult> GenerateTokensAsync(ApplicationUser user)
         {
-            var now = DateTime.UtcNow;
+            var accessToken = GenerateJwt(user);
 
-            // Claims do JWT (o app mobile vai usar principalmente o "sub" = userId)
-            var claims = new[]
+            // Tempo de expiração do refresh token (ex: 30 dias)
+            var refreshDays = int.TryParse(_config["Jwt:RefreshTokenDays"], out var d) ? d : 30;
+            var refreshToken = GenerateSecureToken();
+
+            var rt = new RefreshToken
             {
-                new Claim(JwtRegisteredClaimNames.Sub, user.Id),
-                new Claim(JwtRegisteredClaimNames.Email, user.Email ?? string.Empty),
-                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-                new Claim("firstName", user.FirstName ?? string.Empty),
-                new Claim("lastName", user.LastName ?? string.Empty)
+                Id = Guid.NewGuid(),
+                UserId = user.Id,
+                Token = refreshToken,
+                CreatedAt = DateTime.UtcNow,
+                ExpiresAt = DateTime.UtcNow.AddDays(refreshDays),
+                RevokedAt = null
             };
 
-            // Assinatura do token
-            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtSettings.Key));
-            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-            var expires = now.AddMinutes(_jwtSettings.AccessTokenMinutes);
-
-            var jwt = new JwtSecurityToken(
-                issuer: _jwtSettings.Issuer,
-                audience: _jwtSettings.Audience,
-                claims: claims,
-                notBefore: now,
-                expires: expires,
-                signingCredentials: creds
-            );
-
-            var accessToken = new JwtSecurityTokenHandler().WriteToken(jwt);
-
-            // Cria e salva RefreshToken no banco
-            var refreshToken = await CreateRefreshTokenAsync(user);
+            _db.RefreshTokens.Add(rt);
+            await _db.SaveChangesAsync();
 
             return new TokenResult
             {
                 AccessToken = accessToken,
-                RefreshToken = refreshToken.Token,
-                ExpiresInSeconds = _jwtSettings.AccessTokenMinutes * 60
+                RefreshToken = refreshToken,
+                ExpiresInSeconds = GetAccessTokenExpiresInSeconds()
             };
         }
 
-        /// <summary>
-        /// Rotaciona tokens com base em um refreshToken existente.
-        /// 1) Valida token e expiração
-        /// 2) Revoga token antigo
-        /// 3) Gera um novo par de tokens
-        /// </summary>
         public async Task<TokenResult?> RefreshTokensAsync(string refreshToken)
         {
-            var existing = await _dbContext.RefreshTokens
-                .Include(rt => rt.User)
-                .FirstOrDefaultAsync(rt => rt.Token == refreshToken && !rt.IsRevoked);
+            var existing = await _db.RefreshTokens
+                .FirstOrDefaultAsync(x => x.Token == refreshToken);
 
-            if (existing == null)
-                return null;
+            if (existing == null) return null;
+            if (existing.RevokedAt != null) return null;
+            if (existing.ExpiresAt <= DateTime.UtcNow) return null;
 
-            if (existing.ExpiresAt <= DateTime.UtcNow)
-                return null;
+            // Revoga o refresh token atual (rotação)
+            existing.RevokedAt = DateTime.UtcNow;
 
-            if (existing.User == null)
-                return null;
+            // Emite novos tokens
+            var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == existing.UserId);
+            if (user == null) return null;
 
-            // Revoga o token antigo antes de emitir um novo
-            existing.IsRevoked = true;
-            await _dbContext.SaveChangesAsync();
+            var result = await GenerateTokensAsync(user);
 
-            return await GenerateTokensAsync(existing.User);
+            // Salva a revogação do token anterior
+            await _db.SaveChangesAsync();
+
+            return result;
         }
 
-        /// <summary>
-        /// Cria e persiste um refresh token para o usuário.
-        /// </summary>
-        private async Task<RefreshToken> CreateRefreshTokenAsync(ApplicationUser user)
+        public async Task<bool> RevokeRefreshTokenAsync(string refreshToken)
         {
-            var token = GenerateSecureToken();
+            var existing = await _db.RefreshTokens
+                .FirstOrDefaultAsync(x => x.Token == refreshToken);
 
-            var refreshToken = new RefreshToken
+            if (existing == null) return false;
+
+            if (existing.RevokedAt != null) return true; // já revogado
+
+            existing.RevokedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+            return true;
+        }
+
+        public async Task<int> RevokeAllRefreshTokensAsync(string userId)
+        {
+            var tokens = await _db.RefreshTokens
+                .Where(x => x.UserId == userId && x.RevokedAt == null && x.ExpiresAt > DateTime.UtcNow)
+                .ToListAsync();
+
+            foreach (var t in tokens)
+                t.RevokedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync();
+            return tokens.Count;
+        }
+
+        // ----------------------
+        // Helpers (JWT + tokens)
+        // ----------------------
+
+        private string GenerateJwt(ApplicationUser user)
+        {
+            var key = _config["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key não configurado.");
+            var issuer = _config["Jwt:Issuer"] ?? "AppRoteiros.Auth";
+            var audience = _config["Jwt:Audience"] ?? "AppRoteiros";
+
+            var expiresMinutes = int.TryParse(_config["Jwt:AccessTokenMinutes"], out var m) ? m : 15;
+
+            var claims = new[]
             {
-                Token = token,
-                UserId = user.Id,
-                CreatedAt = DateTime.UtcNow,
-                ExpiresAt = DateTime.UtcNow.AddDays(_jwtSettings.RefreshTokenDays),
-                IsRevoked = false
+                // sub: userId (padrão recomendado)
+                new Claim(JwtRegisteredClaimNames.Sub, user.Id),
+
+                // email (útil no app)
+                new Claim(JwtRegisteredClaimNames.Email, user.Email ?? string.Empty),
+
+                // claim padrão do Identity
+                new Claim(ClaimTypes.NameIdentifier, user.Id)
             };
 
-            _dbContext.RefreshTokens.Add(refreshToken);
-            await _dbContext.SaveChangesAsync();
+            var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
+            var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
-            return refreshToken;
+            var token = new JwtSecurityToken(
+                issuer: issuer,
+                audience: audience,
+                claims: claims,
+                expires: DateTime.UtcNow.AddMinutes(expiresMinutes),
+                signingCredentials: credentials
+            );
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
         }
 
-        /// <summary>
-        /// Gera um token criptograficamente seguro.
-        /// </summary>
+        private int GetAccessTokenExpiresInSeconds()
+        {
+            var expiresMinutes = int.TryParse(_config["Jwt:AccessTokenMinutes"], out var m) ? m : 15;
+            return expiresMinutes * 60;
+        }
+
         private static string GenerateSecureToken()
         {
-            var randomNumber = new byte[64];
-            using var rng = RandomNumberGenerator.Create();
-            rng.GetBytes(randomNumber);
-            return Convert.ToBase64String(randomNumber);
+            // Token aleatório criptograficamente forte (refresh token)
+            var bytes = RandomNumberGenerator.GetBytes(64);
+            return Convert.ToBase64String(bytes);
         }
     }
 }
